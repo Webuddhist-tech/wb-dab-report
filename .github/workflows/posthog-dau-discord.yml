@@ -20,12 +20,12 @@ jobs:
         run: |
           set -euo pipefail
 
-          # Unique users who viewed a page or screen, per day, for the last 8 complete days
-          # (same definition as the "Daily active users" insight on the dashboard).
+          # Unique mobile app users per day, for the last 8 complete days.
+          # $screen events are only sent by the PostHog mobile SDKs, so web traffic is excluded.
           QUERY=$(cat <<'SQL'
           SELECT toDate(timestamp) AS day, count(DISTINCT person_id) AS dau
           FROM events
-          WHERE event IN ('$pageview', '$screen')
+          WHERE event = '$screen'
             AND timestamp >= today() - INTERVAL 8 DAY
             AND timestamp < today()
           GROUP BY day
@@ -67,7 +67,7 @@ jobs:
             '{
               username: "PostHog",
               embeds: [{
-                title: "📊 Daily active users — \($day)",
+                title: "📱 Daily active app users — \($day)",
                 url: $url,
                 color: $color,
                 fields: [
@@ -75,7 +75,7 @@ jobs:
                   { name: "vs previous day", value: "\($change) (\($prev))", inline: true },
                   { name: "7-day average",  value: $avg,    inline: true }
                 ],
-                footer: { text: "Unique users who viewed a page or screen" }
+                footer: { text: "Unique users who viewed a screen in the mobile app" }
               }]
             }')
 
