@@ -16,14 +16,42 @@ jobs:
       POSTHOG_API_KEY: ${{ secrets.POSTHOG_API_KEY }}
       DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
     steps:
-      - name: Fetch DAU from PostHog and post to Discord
+      - name: Fetch mobile app stats from PostHog and post to Discord
         run: |
           set -euo pipefail
 
-          # Unique mobile app users per day, for the last 8 complete days.
-          # $screen events are only sent by the PostHog mobile SDKs, so web traffic is excluded.
-          QUERY=$(cat <<'SQL'
-          SELECT toDate(timestamp) AS day, count(DISTINCT person_id) AS dau
+          # Runs one HogQL query against PostHog and prints the JSON response.
+          hogql() {
+            local body
+            body=$(jq -n --arg q "$1" '{query: {kind: "HogQLQuery", query: $q}}')
+            curl -sS --fail-with-body \
+              -X POST "$POSTHOG_HOST/api/projects/$POSTHOG_PROJECT_ID/query/" \
+              -H "Authorization: Bearer $POSTHOG_API_KEY" \
+              -H "Content-Type: application/json" \
+              -d "$body"
+          }
+
+          # Looks up the value for one day in a [day, value] result list (0 if the day is missing).
+          value_for() {
+            jq -r --arg d "$2" '[.results[] | select(.[0] == $d) | .[1]][0] // 0' <<< "$1"
+          }
+
+          # Percentage change from $2 to $1, e.g. "+3.3%".
+          pct() {
+            awk -v a="$1" -v b="$2" 'BEGIN { if (b > 0) printf "%+.1f%%", (a-b)/b*100; else print "n/a" }'
+          }
+
+          # Seconds -> "4m 12s".
+          dur() {
+            awk -v s="$1" 'BEGIN { s = int(s); if (s >= 60) printf "%dm %02ds", s/60, s%60; else printf "%ds", s }'
+          }
+
+          # 1) DAU per day, last 8 complete days.
+          #    $screen events are only sent by the PostHog mobile SDKs, so web traffic is excluded.
+          #    DAU = unique people who viewed at least one screen.
+          ACTIVITY=$(hogql "$(cat <<'SQL'
+          SELECT toDate(timestamp) AS day,
+                 count(DISTINCT person_id) AS dau
           FROM events
           WHERE event = '$screen'
             AND timestamp >= today() - INTERVAL 8 DAY
@@ -31,39 +59,87 @@ jobs:
           GROUP BY day
           ORDER BY day
           SQL
+          )")
+
+          # 2) Average engagement per active user, per day.
+          #    Each app session's length = time from its first to its last event.
+          #    A user's daily engagement = sum of their sessions that day; we average that across users.
+          #    Only sessions with at least one $screen event (i.e. mobile app sessions) are counted.
+          ENGAGEMENT=$(hogql "$(cat <<'SQL'
+          SELECT day, toInt(round(avg(user_secs))) AS avg_secs
+          FROM (
+            SELECT day, person_id, sum(secs) AS user_secs
+            FROM (
+              SELECT properties.$session_id AS sid,
+                     toDate(min(timestamp)) AS day,
+                     any(person_id) AS person_id,
+                     dateDiff('second', min(timestamp), max(timestamp)) AS secs
+              FROM events
+              WHERE timestamp >= today() - INTERVAL 8 DAY
+                AND timestamp < today()
+                AND properties.$session_id IN (
+                  SELECT properties.$session_id
+                  FROM events
+                  WHERE event = '$screen'
+                    AND properties.$session_id IS NOT NULL
+                    AND timestamp >= today() - INTERVAL 8 DAY
+                    AND timestamp < today()
+                )
+              GROUP BY sid
+            )
+            GROUP BY day, person_id
           )
+          GROUP BY day
+          ORDER BY day
+          SQL
+          )")
 
-          BODY=$(jq -n --arg q "$QUERY" '{query: {kind: "HogQLQuery", query: $q}}')
+          # 3) New users per day: people whose first-ever $screen event fell on that day.
+          NEWUSERS=$(hogql "$(cat <<'SQL'
+          SELECT toDate(first_seen) AS day, count() AS new_users
+          FROM (
+            SELECT person_id, min(timestamp) AS first_seen
+            FROM events
+            WHERE event = '$screen'
+            GROUP BY person_id
+          )
+          WHERE first_seen >= today() - INTERVAL 8 DAY
+            AND first_seen < today()
+          GROUP BY day
+          ORDER BY day
+          SQL
+          )")
 
-          RESPONSE=$(curl -sS --fail-with-body \
-            -X POST "$POSTHOG_HOST/api/projects/$POSTHOG_PROJECT_ID/query/" \
-            -H "Authorization: Bearer $POSTHOG_API_KEY" \
-            -H "Content-Type: application/json" \
-            -d "$BODY")
-
-          ROWS=$(echo "$RESPONSE" | jq '.results | length')
+          ROWS=$(jq '.results | length' <<< "$ACTIVITY")
           if [ "$ROWS" -eq 0 ]; then
             echo "No data returned from PostHog"; exit 1
           fi
 
-          DAY=$(echo "$RESPONSE"  | jq -r '.results[-1][0]')
-          DAU=$(echo "$RESPONSE"  | jq -r '.results[-1][1]')
-          PREV=$(echo "$RESPONSE" | jq -r 'if (.results | length) > 1 then .results[-2][1] else 0 end')
-          AVG7=$(echo "$RESPONSE" | jq -r '[.results[-7:][][1]] | (add / length) | round')
+          # Report day = yesterday (last complete day); compare with the day before it.
+          DAY=$(jq -r '.results[-1][0]' <<< "$ACTIVITY")
+          PREV_DAY=$(jq -r 'if (.results | length) > 1 then .results[-2][0] else "" end' <<< "$ACTIVITY")
 
-          if [ "$PREV" -gt 0 ]; then
-            CHANGE=$(awk -v a="$DAU" -v b="$PREV" 'BEGIN { printf "%+.1f%%", (a-b)/b*100 }')
-          else
-            CHANGE="n/a"
-          fi
+          DAU=$(jq -r '.results[-1][1]' <<< "$ACTIVITY")
+          PREV=$(jq -r 'if (.results | length) > 1 then .results[-2][1] else 0 end' <<< "$ACTIVITY")
+          AVG7=$(jq -r '[.results[-7:][][1]] | (add / length) | round' <<< "$ACTIVITY")
 
-          # Green if up vs previous day, red if down
+          ENG=$(value_for "$ENGAGEMENT" "$DAY")
+          PREV_ENG=$(value_for "$ENGAGEMENT" "$PREV_DAY")
+
+          NEW=$(value_for "$NEWUSERS" "$DAY")
+          PREV_NEW=$(value_for "$NEWUSERS" "$PREV_DAY")
+
+          # Green if DAU is up (or flat) vs previous day, red if down
           if [ "$DAU" -ge "$PREV" ]; then COLOR=5763719; else COLOR=15548997; fi
 
           PAYLOAD=$(jq -n \
-            --arg day "$DAY" --arg dau "$DAU" --arg prev "$PREV" \
-            --arg change "$CHANGE" --arg avg "$AVG7" --argjson color "$COLOR" \
+            --arg day "$DAY" --argjson color "$COLOR" \
             --arg url "$POSTHOG_HOST/project/$POSTHOG_PROJECT_ID/dashboard/1652644" \
+            --arg dau "$DAU" \
+            --arg dau_change "$(pct "$DAU" "$PREV") ($PREV)" \
+            --arg avg "$AVG7" \
+            --arg eng "$(dur "$ENG") ($(pct "$ENG" "$PREV_ENG"))" \
+            --arg new "$NEW ($(pct "$NEW" "$PREV_NEW"))" \
             '{
               username: "PostHog",
               embeds: [{
@@ -71,11 +147,13 @@ jobs:
                 url: $url,
                 color: $color,
                 fields: [
-                  { name: "DAU",            value: $dau,    inline: true },
-                  { name: "vs previous day", value: "\($change) (\($prev))", inline: true },
-                  { name: "7-day average",  value: $avg,    inline: true }
+                  { name: "DAU",                   value: $dau,        inline: true },
+                  { name: "vs previous day",       value: $dau_change, inline: true },
+                  { name: "7-day average",         value: $avg,        inline: true },
+                  { name: "Avg engagement / user", value: $eng,        inline: true },
+                  { name: "New users",             value: $new,        inline: true }
                 ],
-                footer: { text: "Unique users who viewed a screen in the mobile app" }
+                footer: { text: "Mobile app only · % change vs previous day" }
               }]
             }')
 
@@ -83,4 +161,4 @@ jobs:
             -H "Content-Type: application/json" \
             -d "$PAYLOAD"
 
-          echo "Posted DAU $DAU for $DAY"
+          echo "Posted for $DAY: DAU $DAU, avg engagement ${ENG}s, new users $NEW"
