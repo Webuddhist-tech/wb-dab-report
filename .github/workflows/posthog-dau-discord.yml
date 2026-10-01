@@ -1,0 +1,86 @@
+name: PostHog DAU → Discord
+
+on:
+  schedule:
+    # 03:30 UTC = 09:00 IST, every day
+    - cron: "30 3 * * *"
+  workflow_dispatch: # lets you trigger it manually from the Actions tab
+
+jobs:
+  report:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      POSTHOG_HOST: https://us.posthog.com
+      POSTHOG_PROJECT_ID: "449016"
+      POSTHOG_API_KEY: ${{ secrets.POSTHOG_API_KEY }}
+      DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+    steps:
+      - name: Fetch DAU from PostHog and post to Discord
+        run: |
+          set -euo pipefail
+
+          # Unique users who viewed a page or screen, per day, for the last 8 complete days
+          # (same definition as the "Daily active users" insight on the dashboard).
+          QUERY=$(cat <<'SQL'
+          SELECT toDate(timestamp) AS day, count(DISTINCT person_id) AS dau
+          FROM events
+          WHERE event IN ('$pageview', '$screen')
+            AND timestamp >= today() - INTERVAL 8 DAY
+            AND timestamp < today()
+          GROUP BY day
+          ORDER BY day
+          SQL
+          )
+
+          BODY=$(jq -n --arg q "$QUERY" '{query: {kind: "HogQLQuery", query: $q}}')
+
+          RESPONSE=$(curl -sS --fail-with-body \
+            -X POST "$POSTHOG_HOST/api/projects/$POSTHOG_PROJECT_ID/query/" \
+            -H "Authorization: Bearer $POSTHOG_API_KEY" \
+            -H "Content-Type: application/json" \
+            -d "$BODY")
+
+          ROWS=$(echo "$RESPONSE" | jq '.results | length')
+          if [ "$ROWS" -eq 0 ]; then
+            echo "No data returned from PostHog"; exit 1
+          fi
+
+          DAY=$(echo "$RESPONSE"  | jq -r '.results[-1][0]')
+          DAU=$(echo "$RESPONSE"  | jq -r '.results[-1][1]')
+          PREV=$(echo "$RESPONSE" | jq -r 'if (.results | length) > 1 then .results[-2][1] else 0 end')
+          AVG7=$(echo "$RESPONSE" | jq -r '[.results[-7:][][1]] | (add / length) | round')
+
+          if [ "$PREV" -gt 0 ]; then
+            CHANGE=$(awk -v a="$DAU" -v b="$PREV" 'BEGIN { printf "%+.1f%%", (a-b)/b*100 }')
+          else
+            CHANGE="n/a"
+          fi
+
+          # Green if up vs previous day, red if down
+          if [ "$DAU" -ge "$PREV" ]; then COLOR=5763719; else COLOR=15548997; fi
+
+          PAYLOAD=$(jq -n \
+            --arg day "$DAY" --arg dau "$DAU" --arg prev "$PREV" \
+            --arg change "$CHANGE" --arg avg "$AVG7" --argjson color "$COLOR" \
+            --arg url "$POSTHOG_HOST/project/$POSTHOG_PROJECT_ID/dashboard/1652644" \
+            '{
+              username: "PostHog",
+              embeds: [{
+                title: "📊 Daily active users — \($day)",
+                url: $url,
+                color: $color,
+                fields: [
+                  { name: "DAU",            value: $dau,    inline: true },
+                  { name: "vs previous day", value: "\($change) (\($prev))", inline: true },
+                  { name: "7-day average",  value: $avg,    inline: true }
+                ],
+                footer: { text: "Unique users who viewed a page or screen" }
+              }]
+            }')
+
+          curl -sS --fail-with-body -X POST "$DISCORD_WEBHOOK_URL" \
+            -H "Content-Type: application/json" \
+            -d "$PAYLOAD"
+
+          echo "Posted DAU $DAU for $DAY"
