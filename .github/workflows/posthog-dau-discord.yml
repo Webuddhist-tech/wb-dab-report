@@ -141,7 +141,7 @@ jobs:
             --arg eng "$(dur "$ENG") ($(pct "$ENG" "$PREV_ENG"))" \
             --arg new "$NEW ($(pct "$NEW" "$PREV_NEW"))" \
             '{
-              username: "PostHog",
+              username: "Webuddhist analyzer",
               embeds: [{
                 title: "📱 Daily active app users — \($day)",
                 url: $url,
