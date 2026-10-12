@@ -1,0 +1,2 @@
+# Charts for the weekly and monthly reports. The daily report needs only the standard library.
+matplotlib==3.11.2
