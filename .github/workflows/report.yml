@@ -1,0 +1,51 @@
+name: Post a report
+
+# Shared job for the daily, weekly and monthly report workflows.
+# Scheduled runs post to the team channel (DISCORD_WEBHOOK_URL).
+# Manual "Run workflow" runs post to the test channel (DISCORD_TEST_WEBHOOK_URL).
+
+on:
+  workflow_call:
+    inputs:
+      report:
+        description: daily, weekly or monthly
+        required: true
+        type: string
+      date:
+        description: Optional day to report on, YYYY-MM-DD
+        required: false
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  post:
+    name: Post the ${{ inputs.report }} report
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Install the chart library
+        if: inputs.report != 'daily'
+        run: pip install -r requirements.txt
+
+      - name: Build the report from PostHog and post it to Discord
+        env:
+          POSTHOG_HOST: https://us.posthog.com
+          POSTHOG_PROJECT_ID: "449016"
+          POSTHOG_API_KEY: ${{ secrets.POSTHOG_API_KEY }}
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          DISCORD_TEST_WEBHOOK_URL: ${{ secrets.DISCORD_TEST_WEBHOOK_URL }}
+          REPORT: ${{ inputs.report }}
+          REPORT_DATE: ${{ inputs.date }}
+          TARGET: ${{ github.event_name == 'schedule' && 'production' || 'test' }}
+        run: python -m wbreport "$REPORT" --target "$TARGET" ${REPORT_DATE:+--date "$REPORT_DATE"}

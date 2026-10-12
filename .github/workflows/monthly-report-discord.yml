@@ -1,0 +1,23 @@
+name: Monthly report → Discord
+
+on:
+  schedule:
+    # 04:00 UTC on the 1st = 09:30 IST. Reports on the calendar month that just ended.
+    - cron: "0 4 1 * *"
+  workflow_dispatch: # manual runs post to the test channel
+    inputs:
+      date:
+        description: "Any day in the month to report on, YYYY-MM-DD. Leave empty for last month."
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  monthly:
+    uses: ./.github/workflows/report.yml
+    with:
+      report: monthly
+      date: ${{ inputs.date || '' }}
+    secrets: inherit

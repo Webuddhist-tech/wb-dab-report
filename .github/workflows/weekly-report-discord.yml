@@ -1,0 +1,23 @@
+name: Weekly report → Discord
+
+on:
+  schedule:
+    # 03:45 UTC on Mondays = 09:15 IST. Reports on the Monday-to-Sunday week that just ended.
+    - cron: "45 3 * * 1"
+  workflow_dispatch: # manual runs post to the test channel
+    inputs:
+      date:
+        description: "Any day in the week to report on, YYYY-MM-DD. Leave empty for last week."
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  weekly:
+    uses: ./.github/workflows/report.yml
+    with:
+      report: weekly
+      date: ${{ inputs.date || '' }}
+    secrets: inherit
