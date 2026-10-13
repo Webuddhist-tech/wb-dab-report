@@ -3,6 +3,7 @@ name: Post a report
 # Shared job for the daily, weekly and monthly report workflows.
 # Scheduled runs post to the team channel (DISCORD_WEBHOOK_URL).
 # Manual "Run workflow" runs post to the test channel (DISCORD_TEST_WEBHOOK_URL).
+# Airbridge, Firebase and Clarity figures are added only once their secrets and variables are set (see README).
 
 on:
   workflow_call:
@@ -19,12 +20,13 @@ on:
 
 permissions:
   contents: read
+  id-token: write # lets the job sign in to Google Cloud without a stored key
 
 jobs:
   post:
     name: Post the ${{ inputs.report }} report
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
         with:
@@ -38,13 +40,37 @@ jobs:
         if: inputs.report != 'daily'
         run: pip install -r requirements.txt
 
-      - name: Build the report from PostHog and post it to Discord
+      # Keyless sign-in (Workload Identity Federation) for the Crashlytics and notification figures.
+      # Skipped until the two variables are set. If it fails, the report still posts without them.
+      - name: Sign in to Google Cloud
+        id: google
+        if: vars.GCP_WORKLOAD_IDENTITY_PROVIDER != '' && vars.GCP_SERVICE_ACCOUNT != ''
+        continue-on-error: true
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
+        with:
+          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.GCP_SERVICE_ACCOUNT }}
+          token_format: access_token
+          access_token_lifetime: 900s
+          create_credentials_file: false
+          export_environment_variables: false
+
+      - name: Build the report and post it to Discord
         env:
           POSTHOG_HOST: https://us.posthog.com
           POSTHOG_PROJECT_ID: "449016"
           POSTHOG_API_KEY: ${{ secrets.POSTHOG_API_KEY }}
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
           DISCORD_TEST_WEBHOOK_URL: ${{ secrets.DISCORD_TEST_WEBHOOK_URL }}
+          AIRBRIDGE_API_TOKEN: ${{ secrets.AIRBRIDGE_API_TOKEN }}
+          AIRBRIDGE_APP: ${{ vars.AIRBRIDGE_APP }}
+          AIRBRIDGE_TIMEZONE: ${{ vars.AIRBRIDGE_TIMEZONE }}
+          CLARITY_API_TOKEN: ${{ secrets.CLARITY_API_TOKEN }}
+          GOOGLE_ACCESS_TOKEN: ${{ steps.google.outputs.access_token }}
+          FIREBASE_PROJECT_ID: ${{ vars.FIREBASE_PROJECT_ID }}
+          FIREBASE_ANDROID_APP_ID: ${{ vars.FIREBASE_ANDROID_APP_ID }}
+          BIGQUERY_LOCATION: ${{ vars.BIGQUERY_LOCATION }}
+          CRASHLYTICS_PLATFORMS: ${{ vars.CRASHLYTICS_PLATFORMS }}
           REPORT: ${{ inputs.report }}
           REPORT_DATE: ${{ inputs.date }}
           TARGET: ${{ github.event_name == 'schedule' && 'production' || 'test' }}

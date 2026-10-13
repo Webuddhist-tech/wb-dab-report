@@ -18,5 +18,8 @@ HISTORY_START = dt.date(2026, 6, 1)
 # is only partly tracked, so the weekly and monthly reports compare per-day averages instead of totals.
 TRACKING_START = dt.date(2026, 9, 25)
 
+# Android package name and iOS bundle ID (the same for both). Crashlytics names its BigQuery tables after it.
+APP_NAMESPACE = "org.pecha.app"
+
 BOT_NAME = "Webuddhist analyzer"
 USER_AGENT = "wb-dab-report (https://github.com/Webuddhist-tech/wb-dab-report, 2.0)"

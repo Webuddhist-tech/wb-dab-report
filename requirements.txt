@@ -1,2 +1,4 @@
 # Charts for the weekly and monthly reports. The daily report needs only the standard library.
 matplotlib==3.11.2
+# Timezone names (for AIRBRIDGE_TIMEZONE) on Windows, which doesn't ship them. Linux runners have them.
+tzdata==2025.2; sys_platform == "win32"

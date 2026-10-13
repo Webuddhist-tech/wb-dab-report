@@ -81,36 +81,63 @@ LIMIT 500
 
 
 def _person_days(start: dt.date, end: dt.date) -> str:
-    """Seconds in the app per person per day: each app session runs from its first to its last event."""
+    """Seconds with the app on screen, per person per day.
+
+    Within each app session, the time between one event and the next counts unless the app was in the
+    background then: after 'Application Backgrounded' and before the next 'Application Opened'. PostHog
+    keeps a session going while the app is briefly in the background, so first-to-last-event time would
+    count that too. A session counts on the day it started.
+    """
     return f"""
   SELECT day, person_id, sum(secs) AS user_secs
   FROM (
-    SELECT properties.$session_id AS sid,
-           toDate(min(timestamp)) AS day,
-           any(person_id) AS person_id,
-           dateDiff('second', min(timestamp), max(timestamp)) AS secs
-    FROM events
-    WHERE timestamp >= {_ts(start)}
-      AND timestamp < {_ts(end)}
-      AND properties.$session_id IN (
-        SELECT properties.$session_id
-        FROM events
-        WHERE event = '$screen'
-          AND properties.$session_id IS NOT NULL
-          AND timestamp >= {_ts(start)}
-          AND timestamp < {_ts(end)}
-      )
+    SELECT sid,
+           min(day0) AS day,
+           any(pid) AS person_id,
+           sum(if(in_background, 0, gap)) AS secs
+    FROM (
+      SELECT properties.$session_id AS sid,
+             person_id AS pid,
+             toDate(timestamp) AS day0,
+             dateDiff('second', lagInFrame(timestamp, 1, timestamp) OVER upto_now, timestamp) AS gap,
+             -- in the background since the previous event if the app's latest close is newer than its latest open
+             coalesce(max(if(event = 'Application Backgrounded', timestamp, NULL)) OVER before_now, toDateTime(0))
+               > coalesce(max(if(event = 'Application Opened', timestamp, NULL)) OVER before_now, toDateTime(0))
+               AS in_background
+      FROM events
+      WHERE timestamp >= {_ts(start)}
+        AND timestamp < {_ts(end)}
+        AND properties.$session_id IN (
+          SELECT properties.$session_id
+          FROM events
+          WHERE event = '$screen'
+            AND properties.$session_id IS NOT NULL
+            AND timestamp >= {_ts(start)}
+            AND timestamp < {_ts(end)}
+        )
+      WINDOW upto_now AS (PARTITION BY properties.$session_id ORDER BY timestamp
+                          ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW),
+             before_now AS (PARTITION BY properties.$session_id ORDER BY timestamp
+                            ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING)
+    )
     GROUP BY sid
   )
   GROUP BY day, person_id"""
 
 
+# Columns shared by both time queries: the middle person's on-screen time, and how many people
+# had the app on screen for under a minute or for half an hour or more.
+_TIME_COLUMNS = """toInt(round(quantile(0.5)(user_secs))) AS median_secs,
+       toInt(count()) AS timed_people,
+       toInt(countIf(user_secs < 60)) AS quick_people,
+       toInt(countIf(user_secs >= 1800)) AS long_people"""
+
+
 def q_daily_time(start: dt.date, end: dt.date) -> str:
-    """Median ("typical") and average time in the app per person, per day."""
+    """On-screen time per person, per day: the middle person, and the quick and long stays."""
     return f"""
 SELECT toString(day) AS day,
-       toInt(round(quantile(0.5)(user_secs))) AS median_secs,
-       toInt(round(avg(user_secs))) AS avg_secs
+       {_TIME_COLUMNS}
 FROM ({_person_days(start, end)}
 )
 GROUP BY day
@@ -145,7 +172,7 @@ GROUP BY period
 def q_period_time(prev: Period, cur: Period) -> str:
     return f"""
 SELECT if(day >= toDate({_ts(cur.start)}), 'cur', 'prev') AS period,
-       toInt(round(quantile(0.5)(user_secs))) AS median_secs
+       {_TIME_COLUMNS}
 FROM ({_person_days(prev.start, cur.end)}
 )
 GROUP BY period
@@ -302,7 +329,8 @@ def daily_series(run: Run, day: dt.date, days: int = 15) -> dict:
         series[key] = _by_day(activity, key, dates)
     series["new"] = _by_day(new, "new_people", dates)
     series["typical_secs"] = _by_day(times, "median_secs", dates)
-    series["avg_secs"] = _by_day(times, "avg_secs", dates)
+    for key in ("timed_people", "quick_people", "long_people"):
+        series[key] = _by_day(times, key, dates)
     return series
 
 
@@ -312,14 +340,14 @@ def period_data(run: Run, prev: Period, cur: Period) -> dict:
     people_by_day = _by_day(run(q_daily_activity(prev.start, cur.end)), "people", dates)
     new_by_day = _by_day(run(q_daily_new(prev.start, cur.end)), "new_people", dates)
     activity = {r["period"]: r for r in run(q_period_activity(prev, cur))}
-    times = {r["period"]: r["median_secs"] for r in run(q_period_time(prev, cur))}
+    times = {r["period"]: r for r in run(q_period_time(prev, cur))}
     splits = run(q_splits(prev, cur))
     came_back = run(q_came_back(prev, cur))
     funnel = {r["period"]: r for r in run(q_funnel(prev, cur))}
     top = run(q_top_content(cur))
 
     def block(name: str, period: Period, offset: int) -> dict:
-        act, fun = activity.get(name, {}), funnel.get(name, {})
+        act, fun, time = activity.get(name, {}), funnel.get(name, {}), times.get(name, {})
         window = slice(offset, offset + period.days)
         platform = {"Android": 0, "iPhone & iPad": 0}
         languages: dict[str, int] = {}
@@ -336,7 +364,9 @@ def period_data(run: Run, prev: Period, cur: Period) -> dict:
             "daily_dates": [x.isoformat() for x in period.dates()],
             "daily_people": people_by_day[window],
             "daily_new": new_by_day[window],
-            "typical_secs": _num(times.get(name)),
+            "typical_secs": _num(time.get("median_secs")),
+            # person-days: each person counted once for every day they used the app
+            "time_spread": {k: _num(time.get(k)) for k in ("timed_people", "quick_people", "long_people")},
             "activities": {key: _num(act.get(col)) for key, col in ACTIVITY_COLUMNS.items()},
             "platform": platform,
             "languages": languages,

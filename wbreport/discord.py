@@ -35,13 +35,16 @@ def multipart(payload: dict, files: list[tuple[str, bytes]]) -> tuple[bytes, str
 
 
 def without_charts(payload: dict) -> dict:
-    """The same message with the images removed and a short note in the last footer."""
+    """The same message with the images removed and a short note under the last section that had one."""
     plain = copy.deepcopy(payload)
     plain.pop("attachments", None)
-    for embed in plain.get("embeds", []):
+    embeds = plain.get("embeds", [])
+    with_image = [e for e in embeds if "image" in e]
+    target = with_image[-1] if with_image else (embeds[-1] if embeds else None)
+    for embed in embeds:
         embed.pop("image", None)
-    if plain.get("embeds"):
-        footer = plain["embeds"][-1].setdefault("footer", {"text": ""})
+    if target is not None:
+        footer = target.setdefault("footer", {"text": ""})
         footer["text"] = (footer["text"] + " · " if footer["text"] else "") + NO_CHARTS_NOTE
     return plain
 

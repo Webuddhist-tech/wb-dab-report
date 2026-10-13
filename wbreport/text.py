@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import math
 import re
 import unicodedata
 from statistics import mean
@@ -20,6 +21,10 @@ LINK = re.compile(r"://|www\.|discord\.gg|discord(?:app)?\.com/invite", re.IGNOR
 LANGUAGE_NAMES = {"bo": "Tibetan", "en": "English", "zh": "Chinese", "hi": "Hindi", "pi": "Pali", "ne": "Nepali"}
 MAIN_LANGUAGES = ("en", "bo", "zh")
 
+# Airbridge's keys for the channels people ask about. Others are shown as Airbridge names them.
+CHANNEL_NAMES = {"unattributed": "Organic", "google.adwords": "Google Ads", "$$default$$": "Links without a channel"}
+EXTRAS_COLOR = 0x99AAB5
+
 
 # ---------- formatting ----------
 
@@ -31,13 +36,42 @@ def n(x: float) -> str:
     return f"{int(round(x)):,}"
 
 
-def dur(secs: float) -> str:
-    s = int(round(secs))
-    if s >= 3600:
-        return f"{s // 3600}h {s % 3600 // 60:02d}m"
-    if s >= 60:
-        return f"{s // 60}m {s % 60:02d}s"
-    return f"{s}s"
+def _round_secs(secs: float) -> int:
+    """Round a duration to what people can picture: 5 seconds, half a minute, a minute or 5 minutes."""
+    s = max(0, int(round(secs)))
+    step = 5 if s < 60 else 30 if s < 600 else 60 if s < 3600 else 300
+    return int(round(s / step)) * step
+
+
+def minutes(secs: float) -> str:
+    """'45 sec', '4½ min', '12 min', '1 h 20 min'."""
+    s = _round_secs(secs)
+    if s < 60:
+        return f"{s} sec"
+    if s < 3600:
+        m, half = divmod(s, 60)
+        return f"{m}{'½' if half else ''} min"
+    h, m = divmod(s // 60, 60)
+    return f"{h} h {m} min" if m else f"{h} h"
+
+
+def time_change(cur: float, prev: float | None, against: str) -> str:
+    """'▲ 30 sec more than Sat (3½ min)'. Worked out from the rounded figures, so it matches what's shown."""
+    if not prev:
+        return f"no {against} to compare"
+    a, b = _round_secs(cur), _round_secs(prev)
+    if a == b:
+        return f"{ABOUT} same as {against} ({minutes(prev)})"
+    return f"{UP if a > b else DOWN} {minutes(abs(a - b))} {'more' if a > b else 'less'} than {against} ({minutes(prev)})"
+
+
+def time_spread(spread: dict) -> str:
+    """'30% closed it within a minute · 20% stayed half an hour or more', or '' with no data."""
+    people = spread["timed_people"]
+    if not people:
+        return ""
+    return (f"{pct(spread['quick_people'], people)} closed it within a minute · "
+            f"{pct(spread['long_people'], people)} stayed half an hour or more")
 
 
 def pct(part: float, whole: float) -> str:
@@ -167,7 +201,7 @@ def what_changed(s: dict) -> str:
     return sentence + "."
 
 
-def daily_payload(s: dict, dashboard_url: str = config.DASHBOARD_URL) -> dict:
+def daily_payload(s: dict, dashboard_url: str = config.DASHBOARD_URL, extras: dict | None = None) -> dict:
     i = len(s["people"]) - 1
     day, prev_day = d(s["dates"][i]), d(s["dates"][i - 1])
     vs_prev = f"{prev_day:%a}"
@@ -181,29 +215,36 @@ def daily_payload(s: dict, dashboard_url: str = config.DASHBOARD_URL) -> dict:
     lines = []
     if s["people"][i] == 0:
         lines.append("⚠️ **No app activity was recorded for this day.** Data may not have reached PostHog.")
+    def time_line():
+        cur, prev, avg = s["typical_secs"][i], s["typical_secs"][i - 1], mean(s["typical_secs"][week])
+        text = (f"⏱️ Half of people had the app on screen for **{minutes(cur)}** or more\n"
+                f"{time_change(cur, prev, vs_prev)} · {time_change(cur, avg, 'the 7-day average')}")
+        spread = time_spread({k: s[k][i] for k in ("timed_people", "quick_people", "long_people")})
+        return text + (f"\n{spread}" if spread else "")
+
     lines += [
         line("👥", "people opened the app", "people"),
         line("🌱", "people opened the app for the first time", "new"),
         line("📖", "people read a text", "readers"),
-        line("⏱️", "typical time in the app", "typical_secs", fmt=dur),
+        time_line(),
         f"**What changed:** {what_changed(s)}",
     ]
     avg_people = mean(s["people"][week])
     ratio = s["people"][i] / avg_people - 1 if avg_people else 0
     color = RED if ratio <= -0.05 else GREEN if ratio >= 0.05 else NEUTRAL
 
-    return {
-        "username": config.BOT_NAME,
-        "allowed_mentions": NO_PINGS,
-        "embeds": [{
-            "title": f"📱 WeBuddhist app · {day_label(day)}",
-            "url": dashboard_url,
-            "color": color,
-            "description": "\n\n".join(lines),
-            "footer": {"text": "Mobile app (iPhone, iPad, Android) · A day runs 5:30 AM–5:30 AM IST · "
-                               "Typical time: half of people spent more, half less"},
-        }],
-    }
+    embeds = [{
+        "title": f"📱 WeBuddhist app · {day_label(day)}",
+        "url": dashboard_url,
+        "color": color,
+        "description": "\n\n".join(lines),
+        "footer": {"text": "Mobile app (iPhone, iPad, Android) · A day runs 5:30 AM–5:30 AM IST · "
+                           "Time counts only while the app is on screen"},
+    }]
+    more = extras_embed(extras, "daily")
+    if more:
+        embeds.append(more)
+    return {"username": config.BOT_NAME, "allowed_mentions": NO_PINGS, "embeds": embeds}
 
 
 # ---------- weekly / monthly ----------
@@ -230,8 +271,12 @@ def _lang_line(langs: dict) -> str:
 
 
 def period_payload(kind: str, cur: dict, prev: dict, tracking_start: dt.date = config.TRACKING_START,
-                   dashboard_url: str = config.DASHBOARD_URL, charts: list[tuple[str, str]] = ()) -> dict:
-    """kind: 'weekly' or 'monthly'. charts: [(filename, alt text)], one per section, in order."""
+                   dashboard_url: str = config.DASHBOARD_URL, charts: list[tuple[str, str]] = (),
+                   extras: dict | None = None, footer_note: str = "") -> dict:
+    """kind: 'weekly' or 'monthly'. charts: [(filename, alt text)], one per section, in order.
+
+    extras: what extras.collect() returned. footer_note: a line added to the report's footer.
+    """
     weekly = kind == "weekly"
     start, end = d(cur["start"]), d(cur["end"])
     preview = cur.get("preview", False)
@@ -308,8 +353,13 @@ def period_payload(kind: str, cur: dict, prev: dict, tracking_start: dt.date = c
     if cb:
         people_lines.append(f"**{pct(cb['back'], cb['cohort'])}** of {newcomers} newcomers came back "
                             f"({n(cb['back'])} of {n(cb['cohort'])})")
-    people_lines.append(f"**{dur(cur['typical_secs'])}** typical time in the app per day · "
-                        f"{vs(cur['typical_secs'], prev['typical_secs'], dur)}")
+    time_vs = (f"no data for {prev_name}" if prev_partial and not prev_days
+               else time_change(cur["typical_secs"], prev["typical_secs"], prev_name))
+    people_lines.append(f"Half of people had the app on screen for **{minutes(cur['typical_secs'])}** or more a day · "
+                        f"{time_vs}")
+    spread = time_spread(cur["time_spread"])
+    if spread:
+        people_lines.append(f"Each day, {spread}")
 
     # --- What people did ---
     did_lines = [
@@ -354,7 +404,7 @@ def period_payload(kind: str, cur: dict, prev: dict, tracking_start: dt.date = c
 
     span = "Mon–Sun weeks" if weekly else "Calendar months"
     footer = (f"Mobile app · {span}; a day runs 5:30 AM–5:30 AM IST · Counts are people, not visits · "
-              "Typical time: half of people spent more, half less")
+              "Time counts only while the app is on screen") + (f" · {footer_note}" if footer_note else "")
 
     color = WEEKLY_COLOR if weekly else MONTHLY_COLOR
     sections = [("👥 People", people_lines), ("📖 What people did", did_lines),
@@ -368,11 +418,139 @@ def period_payload(kind: str, cur: dict, prev: dict, tracking_start: dt.date = c
             embed["image"] = {"url": f"attachment://{charts[k][0]}"}
         embeds.append(embed)
     embeds[-1]["footer"] = {"text": footer}
+    more = extras_embed(extras, kind, prev_name)
+    if more:
+        embeds.append(more)
 
     payload = {"username": config.BOT_NAME, "allowed_mentions": NO_PINGS, "content": content, "embeds": embeds}
     if charts:
         payload["attachments"] = [{"id": k, "filename": fn, "description": alt} for k, (fn, alt) in enumerate(charts)]
     return payload
+
+
+# ---------- other sources: Airbridge, Firebase, Clarity ----------
+
+def pct1(x: float) -> str:
+    """'99.4%'. Rounded down, so a day with any crash never shows as 100%."""
+    return f"{math.floor(x * 10) / 10:.1f}%".replace(".0%", "%")
+
+
+def points(cur: float | None, prev: float | None, against: str) -> str:
+    """Change in a percentage, in points: '▲ 0.3 points vs Sat (99.1%)'."""
+    if cur is None or prev is None:
+        return f"no {against} to compare"
+    diff = cur - prev
+    if abs(diff) < 0.1:
+        return f"{ABOUT} {against} ({pct1(prev)})"
+    return f"{UP if diff > 0 else DOWN} {abs(diff):.1f} points vs {against} ({pct1(prev)})"
+
+
+def _crash_free(block: dict) -> float | None:
+    return 100 * (1 - block["crashed"] / block["active"]) if block["active"] else None
+
+
+def _channel(key: str) -> str:
+    # Channel names come from tracking links, which anyone can make up, so they go through title().
+    return CHANNEL_NAMES.get(key) or title(key or "unknown")
+
+
+def installs_lines(x: dict, against: str) -> list[str]:
+    rows = sorted((r for r in x["channels"] if r["installs"] > 0), key=lambda r: -r["installs"])
+    total = sum(r["installs"] for r in rows)
+    if not total:
+        return [f"📥 **No installs** recorded by Airbridge · {against}: {n(x['prev_total'])}"]
+    parts = [f"{_channel(r['channel'])} {pct(r['installs'], total)}" for r in rows[:3]]
+    rest = total - sum(r["installs"] for r in rows[:3])
+    if rest:
+        parts.append(f"other {pct(rest, total)}")
+    masked = " (Meta rounds some counts down)" if any(r["masked"] for r in rows) else ""
+    return [f"📥 **{n(total)} installs** · {change(total, x['prev_total'], against)}",
+            "Came from: " + " · ".join(parts) + masked]
+
+
+def crash_lines(c: dict, when: str, against: str) -> list[str]:
+    cur = c["cur"]
+    platforms = [f"{name} {pct1(100 * (1 - k / a))}" for name, (a, k) in cur["by_platform"].items() if a]
+    detail = f"{n(cur['crashed'])} of {n(cur['active'])} people had the app crash"
+    if len(platforms) > 1:
+        detail += " · " + " · ".join(platforms)
+    when = f" {when}" if when else ""
+    return [f"🛟 **{pct1(_crash_free(cur))} crash-free**{when} · {points(_crash_free(cur), _crash_free(c['prev']), against)}",
+            detail]
+
+
+def notification_lines(x: dict, when: str, against: str | None) -> list[str]:
+    days = x["days"]
+    sent = sum(day["accepted"] for day in days)
+    share = {k: sum(day[k] * day["accepted"] for day in days) / sent for k in ("delivered", "pending", "dropped")}
+    head = f"🔔 **{share['delivered']:.0f}% of notifications reached** Android phones {when}"
+    if x.get("prev"):
+        head += f" · {points(share['delivered'], x['prev']['delivered'], against)}"
+    return [head, f"{share['pending']:.0f}% waiting for phones that were offline · {share['dropped']:.0f}% dropped · "
+                  f"measured on {n(sent)} messages"]
+
+
+def website_lines(w: dict) -> list[str]:
+    head = f"🌐 **{n(w['visits'])} website visits** in the last 24 hours"
+    if w["pages_per_visit"] is not None:
+        head += f" · {w['pages_per_visit']:.1f} pages per visit"
+    if w["active_secs"] is not None:
+        head += f" · {minutes(w['active_secs'])} active per visit"
+    issues = [(label, w["issues"].get(key)) for key, label in
+              (("rage_clicks", "rage clicks"), ("dead_clicks", "clicks that did nothing"), ("script_errors", "page errors"))]
+    issues = " · ".join(f"{label} in {v:.0f}% of visits" for label, v in issues if v is not None)
+    return [head] + ([issues[0].upper() + issues[1:]] if issues else [])
+
+
+def extras_embed(x: dict | None, kind: str, prev_name: str = "") -> dict | None:
+    """One embed with whatever the optional sources returned, or None when none are set up."""
+    if not x:
+        return None
+    blocks, sources, footer = [], [], []
+    daily = kind == "daily"
+    if x.get("installs"):
+        i = x["installs"]
+        against = f"{d(i['start']) - dt.timedelta(days=1):%a}" if daily else prev_name
+        blocks.append(installs_lines(i, against))
+        sources.append("Installs")
+        footer.append(f"Installs: Airbridge, days in {i['timezone']}")
+    if x.get("crashes"):
+        c = x["crashes"]
+        start, end = d(c["start"]), d(c["end"])
+        if daily:
+            when, against = f"on {day_label(start)}", f"{start - dt.timedelta(days=1):%a}"
+        else:
+            when, against = (f"({range_label(start, end)})" if c.get("partial") else ""), prev_name
+        blocks.append(crash_lines(c, when, against))
+        sources.append("crashes")
+        footer.append("Crashes: Firebase Crashlytics, a day behind")
+    if x.get("notifications"):
+        days = x["notifications"]["days"]
+        first, last = d(days[0]["date"]), d(days[-1]["date"])
+        when = f"on {day_label(last)}" if daily else f"({range_label(first, last)})"
+        prev = x["notifications"].get("prev")
+        blocks.append(notification_lines(x["notifications"], when, f"{d(prev['date']):%a}" if prev else None))
+        sources.append("notifications")
+        footer.append("Notifications: Firebase, Android only, up to 5 days behind")
+    if x.get("website"):
+        blocks.append(website_lines(x["website"]))
+        sources.append("website")
+        footer.append(f"Website: Microsoft Clarity, 24 hours to {x['website']['fetched_at']} UTC")
+    if x.get("notes"):
+        blocks.append([f"⚠️ {note}" for note in x["notes"]])
+    if not blocks:
+        return None
+    if not sources:
+        heading = "Other sources"
+    elif len(sources) == 1:
+        heading = sources[0]
+    else:
+        heading = ", ".join(sources[:-1]) + " and " + sources[-1]
+    embed = {"title": f"📥 {heading[0].upper() + heading[1:]}", "color": EXTRAS_COLOR,
+             "description": "\n\n".join("\n".join(b) for b in blocks)}
+    if footer:
+        embed["footer"] = {"text": " · ".join(footer)}
+    return embed
 
 
 # ---------- Discord limits ----------

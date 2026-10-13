@@ -13,6 +13,7 @@ on:
 
 permissions:
   contents: read
+  id-token: write # passed on to report.yml for the keyless Google Cloud sign-in
 
 jobs:
   weekly:

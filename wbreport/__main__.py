@@ -14,7 +14,8 @@ import sys
 import tempfile
 import traceback
 
-from . import config, discord, periods, queries, text
+from . import config, discord, extras, periods, queries, text
+from .periods import DAY, Period
 from .posthog import Client, PostHogError
 
 WEBHOOK_ENV = {"production": "DISCORD_WEBHOOK_URL", "test": "DISCORD_TEST_WEBHOOK_URL"}
@@ -25,12 +26,14 @@ def build(report: str, run, date=None, today=None, chart_dir: str | None = None)
     today = today or periods.utc_today()
     if report == "daily":
         day = periods.daily_day(today, date)
-        payload = text.daily_payload(queries.daily_series(run, day))
-        return payload, [], f"daily report for {day}"
+        series = queries.daily_series(run, day)
+        more = extras.collect("daily", Period(day, day + DAY), Period(day - DAY, day), today, picked=date is not None)
+        return text.daily_payload(series, extras=more), [], f"daily report for {day}"
 
     cur, prev, preview = (periods.week_periods if report == "weekly" else periods.month_periods)(today, date)
     data = queries.period_data(run, prev, cur)
     data["cur"]["preview"] = preview
+    more = extras.collect(report, cur, prev, today, picked=date is not None)
     label = f"{report} report for {cur.start} to {cur.last}" + (" (so far)" if preview else "")
 
     chart_dir = chart_dir or tempfile.mkdtemp(prefix="wbreport-")
@@ -40,13 +43,14 @@ def build(report: str, run, date=None, today=None, chart_dir: str | None = None)
         specs = charts.period_charts(report, data["cur"], data["prev"], chart_dir)
     except Exception as err:  # a broken chart shouldn't stop the report: post the text instead
         print(f"::warning::Couldn't draw the charts ({type(err).__name__}). Posting text only.")
-        payload = text.period_payload(report, data["cur"], data["prev"])
-        return discord.without_charts(payload), [], label
+        payload = text.period_payload(report, data["cur"], data["prev"], extras=more,
+                                      footer_note=discord.NO_CHARTS_NOTE)
+        return payload, [], label
     files = []
     for filename, _alt in specs:
         with open(os.path.join(chart_dir, filename), "rb") as fh:
             files.append((filename, fh.read()))
-    return text.period_payload(report, data["cur"], data["prev"], charts=specs), files, label
+    return text.period_payload(report, data["cur"], data["prev"], charts=specs, extras=more), files, label
 
 
 def main(argv=None) -> int:
