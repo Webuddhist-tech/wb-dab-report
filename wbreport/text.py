@@ -428,7 +428,7 @@ def period_payload(kind: str, cur: dict, prev: dict, tracking_start: dt.date = c
     return payload
 
 
-# ---------- other sources: Airbridge, Firebase, Clarity ----------
+# ---------- other sources: Airbridge, Firebase ----------
 
 def pct1(x: float) -> str:
     """'99.4%'. Rounded down, so a day with any crash never shows as 100%."""
@@ -490,18 +490,6 @@ def notification_lines(x: dict, when: str, against: str | None) -> list[str]:
                   f"measured on {n(sent)} messages"]
 
 
-def website_lines(w: dict) -> list[str]:
-    head = f"🌐 **{n(w['visits'])} website visits** in the last 24 hours"
-    if w["pages_per_visit"] is not None:
-        head += f" · {w['pages_per_visit']:.1f} pages per visit"
-    if w["active_secs"] is not None:
-        head += f" · {minutes(w['active_secs'])} active per visit"
-    issues = [(label, w["issues"].get(key)) for key, label in
-              (("rage_clicks", "rage clicks"), ("dead_clicks", "clicks that did nothing"), ("script_errors", "page errors"))]
-    issues = " · ".join(f"{label} in {v:.0f}% of visits" for label, v in issues if v is not None)
-    return [head] + ([issues[0].upper() + issues[1:]] if issues else [])
-
-
 def extras_embed(x: dict | None, kind: str, prev_name: str = "") -> dict | None:
     """One embed with whatever the optional sources returned, or None when none are set up."""
     if not x:
@@ -532,10 +520,6 @@ def extras_embed(x: dict | None, kind: str, prev_name: str = "") -> dict | None:
         blocks.append(notification_lines(x["notifications"], when, f"{d(prev['date']):%a}" if prev else None))
         sources.append("notifications")
         footer.append("Notifications: Firebase, Android only, up to 5 days behind")
-    if x.get("website"):
-        blocks.append(website_lines(x["website"]))
-        sources.append("website")
-        footer.append(f"Website: Microsoft Clarity, 24 hours to {x['website']['fetched_at']} UTC")
     if x.get("notes"):
         blocks.append([f"⚠️ {note}" for note in x["notes"]])
     if not blocks:

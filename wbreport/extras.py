@@ -1,4 +1,4 @@
-"""Optional figures from Airbridge, Firebase and Clarity, shown next to the PostHog numbers.
+"""Optional figures from Airbridge and Firebase, shown next to the PostHog numbers.
 
 Each source runs only when its settings are present. A failure in one never stops the report: that
 section is left out, the message says so in one line, and the Actions log gets a warning without
@@ -11,7 +11,7 @@ import os
 import traceback
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from . import airbridge, clarity, config, firebase
+from . import airbridge, config, firebase
 from .http import SourceError
 from .periods import DAY, Period
 
@@ -103,16 +103,6 @@ def _notifications(report: str, cur: Period, prev: Period, today: dt.date, picke
     return {"days": [days[i]], "prev": days[i - 1] if i > 0 else None}
 
 
-# ---------- Clarity ----------
-
-def _clarity(report: str, cur: Period, prev: Period, today: dt.date, picked: bool) -> dict | None:
-    token = env("CLARITY_API_TOKEN")
-    # The API covers only the 24 hours before the call: nothing for a picked date, a week or a month.
-    if not token or report != "daily" or picked:
-        return None
-    return clarity.last_24_hours(token)
-
-
 # ---------- collecting ----------
 
 SOURCES = [
@@ -120,7 +110,6 @@ SOURCES = [
     ("installs", "Airbridge", _airbridge),
     ("crashes", "Crashlytics", _crashes),
     ("notifications", "Firebase notification", _notifications),
-    ("website", "Clarity", _clarity),
 ]
 
 

@@ -3,7 +3,7 @@ name: Post a report
 # Shared job for the daily, weekly and monthly report workflows.
 # Scheduled runs post to the team channel (DISCORD_WEBHOOK_URL).
 # Manual "Run workflow" runs post to the test channel (DISCORD_TEST_WEBHOOK_URL).
-# Airbridge, Firebase and Clarity figures are added only once their secrets and variables are set (see README).
+# Airbridge and Firebase figures are added only once their secrets and variables are set (see README).
 
 on:
   workflow_call:
@@ -65,7 +65,6 @@ jobs:
           AIRBRIDGE_API_TOKEN: ${{ secrets.AIRBRIDGE_API_TOKEN }}
           AIRBRIDGE_APP: ${{ vars.AIRBRIDGE_APP }}
           AIRBRIDGE_TIMEZONE: ${{ vars.AIRBRIDGE_TIMEZONE }}
-          CLARITY_API_TOKEN: ${{ secrets.CLARITY_API_TOKEN }}
           GOOGLE_ACCESS_TOKEN: ${{ steps.google.outputs.access_token }}
           FIREBASE_PROJECT_ID: ${{ vars.FIREBASE_PROJECT_ID }}
           FIREBASE_ANDROID_APP_ID: ${{ vars.FIREBASE_ANDROID_APP_ID }}

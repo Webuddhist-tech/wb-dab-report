@@ -1,6 +1,6 @@
 # wb-dab-report
 
-Posts WeBuddhist app analytics from PostHog to the team's Discord channel, written for people without an analytics background. Once they're set up, the reports also show installs by channel (Airbridge), crash-free users and notification delivery (Firebase) and website visits (Microsoft Clarity): see [Other sources](#other-sources-airbridge-firebase-clarity).
+Posts WeBuddhist app analytics from PostHog to the team's Discord channel, written for people without an analytics background. Once they're set up, the reports also show installs by channel (Airbridge) and crash-free users and notification delivery (Firebase): see [Other sources](#other-sources-airbridge-and-firebase). Everything is about the mobile app.
 
 | Report  | When (IST)                | Cron (UTC)    | Covers                                   | Compared with                  |
 |---------|---------------------------|---------------|------------------------------------------|--------------------------------|
@@ -20,9 +20,9 @@ Set under **Settings > Secrets and variables > Actions**:
 - `DISCORD_WEBHOOK_URL`: the team channel. Scheduled runs post here.
 - `DISCORD_TEST_WEBHOOK_URL`: a test channel. Manual runs post here and fail if it isn't set.
 
-The other sources add two more secrets and some variables, listed below.
+The other sources add one more secret and some variables, listed below.
 
-## Other sources: Airbridge, Firebase, Clarity
+## Other sources: Airbridge and Firebase
 
 Each source is optional and appears in its own section under the PostHog figures once its settings are in place. If a source fails on a given day, the report still posts, with one line saying that source's figures couldn't be fetched, and the Actions log gets a warning (without numbers).
 
@@ -33,7 +33,6 @@ Secrets go under **Settings > Secrets and variables > Actions > Secrets**, varia
 | Airbridge | All | Installs and the top channels they came from | Secret `AIRBRIDGE_API_TOKEN`; variables `AIRBRIDGE_APP`, `AIRBRIDGE_TIMEZONE` |
 | Firebase Crashlytics | All | Crash-free users, per platform | Variables `FIREBASE_PROJECT_ID`, `BIGQUERY_LOCATION`, plus the Google Cloud sign-in below |
 | Firebase Cloud Messaging | All | Share of notifications that reached Android phones | Variables `FIREBASE_PROJECT_ID`, `FIREBASE_ANDROID_APP_ID`, plus the Google Cloud sign-in below |
-| Microsoft Clarity | Daily only | Website visits, pages and time per visit, rage clicks, dead clicks, page errors | Secret `CLARITY_API_TOKEN` |
 
 ### Airbridge
 
@@ -42,12 +41,6 @@ Secrets go under **Settings > Secrets and variables > Actions > Secrets**, varia
 3. Set the variable `AIRBRIDGE_APP` to the app name shown in **Settings > Tokens**, and `AIRBRIDGE_TIMEZONE` to the app timezone shown in **Settings > App Settings**, written like `Asia/Kolkata`.
 
 Airbridge counts days in the app's timezone, not UTC, so its day runs slightly differently from the PostHog figures. It also corrects the previous two days at 9 PM UTC, so the latest day can still rise a little.
-
-### Microsoft Clarity
-
-In Clarity, open the website project's **Settings > Data Export > Generate new API token** (project admins only), and save the token as the secret `CLARITY_API_TOKEN`.
-
-Clarity's API covers only the 24 hours before the call and allows 10 calls a day per project, so its figures appear in the daily report only, and manual runs use up the same allowance.
 
 ### Firebase
 
@@ -113,7 +106,7 @@ python -m wbreport weekly --date 2026-10-01 --dry-run out/   # writes out/weekly
 python -m wbreport daily --target test                       # needs DISCORD_TEST_WEBHOOK_URL
 ```
 
-To include the other sources locally, export the same secrets and variables. For Firebase, `GOOGLE_ACCESS_TOKEN=$(gcloud auth print-access-token)` works if your own Google account can read the datasets. With a date picked, Airbridge and Crashlytics report on that date, Firebase notifications only if it's within the week Firebase keeps, and Clarity is left out.
+To include the other sources locally, export the same secrets and variables. For Firebase, `GOOGLE_ACCESS_TOKEN=$(gcloud auth print-access-token)` works if your own Google account can read the datasets. With a date picked, Airbridge and Crashlytics report on that date, and Firebase notifications only if it's within the week Firebase keeps.
 
 ## How the numbers are counted
 
@@ -132,8 +125,6 @@ All figures are counts of people or medians across people, computed inside PostH
 | Installs, came from | Airbridge's app installs, by channel, in the app's timezone. "Organic" means no ad or tracking link. Meta's privacy rules round some of its counts down |
 | Crash-free | Of the app installations that opened the app (Firebase sessions), the share that had no crash closing the app. Firebase exports this once a day at no fixed time, so the daily report shows the day before yesterday, and a week or month stops there too |
 | Notifications reached | Firebase's share of notifications delivered to Android phones that share usage data with Google, weighted across all messages. It runs up to 5 days behind and has no iPhone figures. Weekly and monthly reports show the latest days Firebase has |
-| Website visits | Clarity's visits in the 24 hours before the report ran, without bot visits. Pages and active time are averages per visit; problems are the share of visits with at least one |
-
 The daily "What changed" line is written by fixed rules in `wbreport/text.py`: how many days in a row the number moved, whether one platform carried the change, and which signal (notification opens, live-session joins, first-time people) moved with it.
 
 Tracking went live on 25 Sep 2026 (`TRACKING_START` in `wbreport/config.py`). A comparison period that starts before that date shows its totals side by side and compares per-day figures only.

@@ -1,4 +1,4 @@
-"""JSON over HTTPS for the optional sources (Airbridge, Clarity, Google). Standard library only."""
+"""JSON over HTTPS for the optional sources (Airbridge, Google). Standard library only."""
 from __future__ import annotations
 
 import http.client
